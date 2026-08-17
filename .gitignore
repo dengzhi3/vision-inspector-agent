@@ -15,6 +15,7 @@ outputs/*
 
 # pytest
 .pytest_cache/
+.pytest_tmp*/
 
 # Model weights
 models/*.pt
