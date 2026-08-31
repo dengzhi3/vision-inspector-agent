@@ -2,33 +2,54 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from pydantic import BaseModel, Field
 
-from pydantic import BaseModel
 
 class HealthResponse(BaseModel):
     status: str = "ok"
 
-@dataclass
-class Detection:
+
+class Detection(BaseModel):
     """单个检测框。"""
 
-    class_id: int
-    class_name: str
-    confidence: float
-    bbox: list[int]  # [x1, y1, x2, y2]，整数像素坐标
+    class_id: int = Field(
+        ge=0,
+        description="Detected class ID",
+    )
+    class_name: str = Field(
+        min_length=1,
+        description="Detected class name",
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence score of the detection",
+    )
+    bbox: list[int] = Field(
+        description="Bounding box coordinates the in the format of [x1, y1, x2, y2]",
+    )
 
 
-@dataclass
-class DetectionResult:
+class DetectionResult(BaseModel):
     """单张图片的推理结果。"""
 
-    image_width: int
-    image_height: int
-    inference_time_ms: float
-    detections: list[Detection] = field(default_factory=list)
+    image_width: int = Field(
+        gt=0,
+        description="Width of the input image in pixels",
+    )
+    image_height: int = Field(
+        gt=0,
+        description="Height of the input image in pixels",
+    )
+    inference_time_ms: float = Field(
+        ge=0.0,
+        description="Inference time of the prediction in milliseconds",
+    )
+    detections: list[Detection] = Field(
+        default_factory=list,
+        description="Detected objects in the image",
+    )
 
     def to_dict(self) -> dict:
         """转换为与约定一致的 JSON 结构。"""
-        return asdict(self)
-
+        return self.model_dump()
