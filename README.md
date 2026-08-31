@@ -654,3 +654,10 @@ Agent
 ```text
 VisionInspector Agent
 ```
+
+## FastAPI API
+
+启动开发服务器：
+
+```bash
+uv run uvicorn app.api:app --reload
