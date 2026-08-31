@@ -8,10 +8,8 @@ dependencies = [
     "dill>=0.4.1",
     "efficientnet-pytorch>=0.7.1",
     "einops>=0.8.2",
-    "fastapi>=0.141.1",
     "pandas>=3.0.5",
     "py-cpuinfo>=9.0.0",
-    "python-multipart>=0.0.32",
     "pywavelets>=1.9.0",
     "scipy>=1.17.1",
     "seaborn>=0.13.2",
@@ -19,7 +17,6 @@ dependencies = [
     "timm>=1.0.28",
     "tqdm>=4.67.3",
     "ultralytics>=8.4.118",
-    "uvicorn[standard]>=0.52.4",
 ]
 
 [[tool.uv.index]]
