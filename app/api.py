@@ -8,6 +8,9 @@ from app.config import Settings
 from app.model_loader import ModelNotFoundError
 from app.predictor import InvalidImageError, predict_image
 
+from app.schemas import HealthResponse
+
+
 app = FastAPI(
     title="Vision Inspector Agent",
     version="0.1.0",
@@ -19,12 +22,9 @@ app = FastAPI(
 def root():
     return {"message": "Vision Inspector API"}
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 def health():
-    return {
-        "status": "ok"
-    }
-
+    return HealthResponse(status="ok")
 
 @app.get("/model/info")
 def model_info():

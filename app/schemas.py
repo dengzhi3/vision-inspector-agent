@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+from pydantic import BaseModel
+
+class HealthResponse(BaseModel):
+    status: str = "ok"
 
 @dataclass
 class Detection:
