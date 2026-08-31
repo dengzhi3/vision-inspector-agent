@@ -86,14 +86,51 @@ def test_detection_result_creation(detection_result, detection, empty_result):
 
 
 def test_bbox_structure(detection):
-    """bbox 应为 [x1, y1, x2, y2] 的整数像素坐标，且 x1<=x2、y1<=y2。"""
+    """bbox 应为 [x1, y1, x2, y2] 的整数像素坐标，且 x1<x2、y1<y2。"""
     x1, y1, x2, y2 = detection.bbox
 
     assert len(detection.bbox) == 4
     assert all(isinstance(coord, int) for coord in detection.bbox)
-    assert x1 <= x2
-    assert y1 <= y2
+    assert x1 < x2
+    assert y1 < y2
     assert detection.bbox == [120, 80, 600, 420]
+
+
+@pytest.mark.parametrize(
+    "bbox",
+    [
+        [0, 0, 10, 10],
+        [120, 80, 600, 420],
+        [0, 0, 1, 1],
+    ],
+)
+def test_bbox_validation_valid(detection_kwargs, bbox):
+    """合法的 bbox 应通过 validate_bbox 并保持原值。"""
+    detection = Detection(**{**detection_kwargs, "bbox": bbox})
+
+    assert detection.bbox == bbox
+
+
+@pytest.mark.parametrize(
+    "bbox",
+    [
+        [],                          # 长度不足
+        [1, 2, 3],                   # 长度不足
+        [0, 0, 10, 10, 20],          # 长度超限
+        "abcd",                      # 不是列表
+        [0, 0.5, 10, 10],            # 坐标不是整数
+        [-1, 0, 10, 10],             # x1 为负
+        [0, -1, 10, 10],             # y1 为负
+        [10, 0, 10, 10],             # x2 不大于 x1
+        [10, 0, 5, 10],              # x2 小于 x1
+        [0, 10, 10, 10],             # y2 不大于 y1
+        [0, 10, 10, 5],              # y2 小于 y1
+    ],
+)
+def test_bbox_validation_invalid(detection_kwargs, bbox):
+    """非法的 bbox 应由 validate_bbox 拒绝并触发 ValidationError。"""
+    with pytest.raises(ValidationError):
+        Detection(**{**detection_kwargs, "bbox": bbox})
 
 
 @pytest.mark.parametrize(

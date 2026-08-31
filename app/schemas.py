@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -28,6 +28,26 @@ class Detection(BaseModel):
     bbox: list[int] = Field(
         description="Bounding box coordinates the in the format of [x1, y1, x2, y2]",
     )
+
+    @field_validator("bbox", mode="before")
+    @classmethod
+    def validate_bbox(cls, bbox: list[int]) -> list[int]:
+        """确保 bbox 是长度为 4 的整数列表，且满足 [x1, y1, x2, y2] 的坐标约束。"""
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            raise ValueError("bbox 必须是长度为 4 的列表")
+        if not all(isinstance(coord, int) for coord in bbox):
+            raise ValueError("bbox 中的坐标必须是整数")
+        x1, y1, x2, y2 = bbox
+
+        if x1 < 0 or y1 < 0:
+            raise ValueError("bbox coordinates must be non-negative")
+
+        if x2 <= x1:
+            raise ValueError("x2 must be greater than x1")
+
+        if y2 <= y1:
+            raise ValueError("y2 must be greater than y1")
+        return bbox
 
 
 class DetectionResult(BaseModel):
