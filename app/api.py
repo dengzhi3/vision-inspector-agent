@@ -25,6 +25,16 @@ app = FastAPI(
 )
 
 
+# 与 app.predictor.SUPPORTED_IMAGE_EXTS 对应的标准图片 MIME 类型
+SUPPORTED_IMAGE_MIME_TYPES = {
+    "image/bmp",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+}
+
+
 def _error_response(status_code: int, error_code: str, message: str) -> JSONResponse:
     """构造符合 ErrorResponse schema 的统一错误响应。"""
     return JSONResponse(
@@ -113,6 +123,8 @@ async def upload(file: UploadFile):
 async def create_prediction(file: UploadFile = File(...)) -> PredictionResponse:
     """上传单张图片，临时落盘后调用 app.predictor.predict_image() 推理，返回统一 JSON 结果。"""
     settings = Settings.from_env()
+    if file.content_type not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise InvalidImageError(f"不支持的图片 MIME 类型: {file.content_type!r}")
     suffix = Path(file.filename or "").suffix.lower()
     tmp_path: Path | None = None
     try:

@@ -19,7 +19,7 @@ from app.api import app
 from app.config import Settings
 from app.model_loader import ModelNotFoundError
 from app.predictor import InvalidImageError
-from app.schemas import DetectionResult, ErrorResponse
+from app.schemas import Detection, DetectionResult, ErrorResponse
 
 
 def _png_bytes(width: int = 320, height: int = 240) -> bytes:
@@ -171,3 +171,116 @@ def test_openapi_declares_error_response():
         "/ErrorResponse"
     )
     assert "ErrorResponse" in schema["components"]["schemas"]
+
+
+def test_prediction_txt_rejected(client):
+    """上传 .txt 文件（即使 MIME 声明为图片）应被拒绝并返回 400。"""
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("notes.txt", b"hello", "image/png")},
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error_code"] == "INVALID_IMAGE"
+    assert "不支持的图片格式" in body["message"]
+    assert "'.txt'" in body["message"]
+
+
+def test_prediction_empty_file(client, monkeypatch):
+    """上传空文件时推理应失败，API 返回 400 且响应体符合 ErrorResponse schema。"""
+    model = mock.Mock()
+    model.predict.side_effect = RuntimeError("decode failed")
+    monkeypatch.setattr("app.predictor.load_model", lambda *args, **kwargs: model)
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("empty.png", b"", "image/png")},
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert set(body) == {"error_code", "message"}
+    assert body["error_code"] == "INVALID_IMAGE"
+    assert body["message"].startswith("图片无法解码或推理失败")
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_status"),
+    [
+        # 文件名为空时，multipart 部分被当作普通表单字段，
+        # FastAPI 在参数校验阶段直接拒绝（422），不会进入端点逻辑
+        ("", 422),
+        # 没有图片扩展名时，predictor 的扩展名校验拒绝（400）
+        ("no_extension", 400),
+    ],
+)
+def test_prediction_invalid_filename(client, valid_png, filename, expected_status):
+    """文件名为空或没有图片扩展名时，请求都应被拒绝。"""
+
+    resp = client.post(
+        "/predictions",
+        files={"file": (filename, valid_png, "image/png")},
+    )
+
+    assert resp.status_code == expected_status
+    if expected_status == 400:
+        body = resp.json()
+        assert body["error_code"] == "INVALID_IMAGE"
+        assert "不支持的图片格式" in body["message"]
+
+
+def test_prediction_wrong_mime_type(client, monkeypatch, valid_png):
+    """声明了非图片 MIME 类型（text/plain）时，即使扩展名合法也应返回 400，
+    且不会进入推理阶段。"""
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("valid.png", valid_png, "text/plain")},
+    )
+
+    _assert_error_response(resp, 400, "INVALID_IMAGE", "不支持的图片 MIME 类型: 'text/plain'")
+    fake.assert_not_called()
+
+
+def test_prediction_response_structure_with_detections(client, monkeypatch):
+    """有检测目标时，响应应包含完整的嵌套结构（class_id/class_name/confidence/bbox）。"""
+    fake = mock.Mock(
+        return_value=DetectionResult(
+            image_width=320,
+            image_height=240,
+            inference_time_ms=45.6,
+            detections=[
+                Detection(
+                    class_id=0,
+                    class_name="crack",
+                    confidence=0.8765,
+                    bbox=[10, 20, 100, 200],
+                )
+            ],
+        )
+    )
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("valid.png", _png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "image_width": 320,
+        "image_height": 240,
+        "inference_time_ms": 45.6,
+        "detections": [
+            {
+                "class_id": 0,
+                "class_name": "crack",
+                "confidence": 0.8765,
+                "bbox": [10, 20, 100, 200],
+            }
+        ],
+    }
