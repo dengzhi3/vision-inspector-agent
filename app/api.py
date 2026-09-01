@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import uuid
 from pathlib import Path
@@ -49,6 +50,43 @@ def _ensure_supported_mime_type(file: UploadFile) -> None:
         raise InvalidImageError(f"不支持的图片 MIME 类型: {file.content_type!r}")
 
 
+class FileTooLargeError(ValueError):
+    """上传文件超过大小限制时抛出。"""
+
+
+def _ensure_file_size(content: bytes, settings: Settings) -> None:
+    """拒绝超过大小限制的上传，抛 FileTooLargeError 由统一异常处理器转为 400。"""
+    if len(content) > settings.max_file_size_bytes:
+        max_mb = settings.max_file_size_bytes // (1024 * 1024)
+        raise FileTooLargeError(f"图片大小超过限制（最大 {max_mb} MB）")
+
+
+class PredictionTimeoutError(TimeoutError):
+    """预测超过时间限制时抛出。"""
+
+
+async def _predict_with_timeout(image_path: Path, settings: Settings) -> PredictionResponse:
+    """带超时执行单张图片预测，超时抛 PredictionTimeoutError。"""
+    try:
+        result = await asyncio.wait_for(
+            run_in_threadpool(predict_image, image_path, settings=settings),
+            timeout=settings.prediction_timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise PredictionTimeoutError(
+            f"预测超时（超过 {settings.prediction_timeout_seconds:g} 秒）"
+        ) from exc
+    return PredictionResponse(**result.to_dict())
+
+
+def _unlink_quietly(path: Path) -> None:
+    """尽力清理临时文件；被仍在运行的线程占用时忽略，交由操作系统清理。"""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _error_response(status_code: int, error_code: str, message: str) -> JSONResponse:
     """构造符合 ErrorResponse schema 的统一错误响应。"""
     return JSONResponse(
@@ -81,18 +119,47 @@ async def model_not_found_error_handler(
     )
 
 
+@app.exception_handler(FileTooLargeError)
+async def file_too_large_error_handler(
+    request: Request, exc: FileTooLargeError
+) -> JSONResponse:
+    """上传文件超过大小限制时返回 400，响应体使用统一错误结构。"""
+    return _error_response(
+        status_code=400,
+        error_code="FILE_TOO_LARGE",
+        message=str(exc),
+    )
+
+
+@app.exception_handler(PredictionTimeoutError)
+async def prediction_timeout_error_handler(
+    request: Request, exc: PredictionTimeoutError
+) -> JSONResponse:
+    """预测超过时间限制时返回 504，响应体使用统一错误结构。"""
+    return _error_response(
+        status_code=504,
+        error_code="TIMEOUT",
+        message=str(exc),
+    )
+
+
 # OpenAPI 中声明的错误响应，统一引用 ErrorResponse schema
 _ERROR_RESPONSES: dict[int, dict[str, object]] = {
     400: {
         "model": ErrorResponse,
         "description": (
             "上传的图片无效或无法解码推理（INVALID_IMAGE），"
-            "或批量上传超过数量上限（TOO_MANY_FILES）"
+            "批量上传超过数量上限（TOO_MANY_FILES），"
+            "或上传文件超过大小限制（FILE_TOO_LARGE）"
         ),
     },
     500: {
         "model": ErrorResponse,
         "description": "模型权重文件缺失（MODEL_NOT_FOUND）",
+    },
+    504: {
+        "model": ErrorResponse,
+        "description": "预测超时（TIMEOUT）",
     },
 }
 
@@ -153,18 +220,19 @@ async def create_prediction(file: UploadFile = File(...)) -> PredictionResponse:
     """上传单张图片，临时落盘后调用 app.predictor.predict_image() 推理，返回统一 JSON 结果。"""
     settings = Settings.from_env()
     _ensure_supported_mime_type(file)
+    content = await file.read()
+    _ensure_file_size(content, settings)
     suffix = Path(file.filename or "").suffix.lower()
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await file.read())
+            tmp.write(content)
             tmp_path = Path(tmp.name)
 
-        result = await run_in_threadpool(predict_image, tmp_path, settings=settings)
-        return PredictionResponse(**result.to_dict())
+        return await _predict_with_timeout(tmp_path, settings)
     finally:
         if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+            _unlink_quietly(tmp_path)
 
 
 @app.post(
@@ -188,35 +256,39 @@ async def create_batch_prediction(files: list[UploadFile] = File(...)) -> BatchR
     results: list[BatchItem] = []
     for file in files:
         _ensure_supported_mime_type(file)
+        content = await file.read()
+        _ensure_file_size(content, settings)
         suffix = Path(file.filename or "").suffix.lower()
         tmp_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(await file.read())
+                tmp.write(content)
                 tmp_path = Path(tmp.name)
 
-            result = await run_in_threadpool(predict_image, tmp_path, settings=settings)
+            result = await _predict_with_timeout(tmp_path, settings)
             results.append(
                 BatchItem(
                     filename=file.filename or "",
-                    result=PredictionResponse(**result.to_dict()),
+                    result=result,
                 )
             )
         finally:
             if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+                _unlink_quietly(tmp_path)
 
     return BatchResponse(results=results, total=len(results))
 
 
-def _run_prediction_task(task_id: str, image_path: Path, settings: Settings) -> None:
+async def _run_prediction_task(task_id: str, image_path: Path, settings: Settings) -> None:
     """后台执行单张图片预测并更新任务状态，无论成败都清理临时文件。"""
     task = _TASKS[task_id]
     task.status = TaskStatus.RUNNING
     try:
-        result = predict_image(image_path, settings=settings)
-        task.result = PredictionResponse(**result.to_dict())
+        task.result = await _predict_with_timeout(image_path, settings)
         task.status = TaskStatus.COMPLETED
+    except PredictionTimeoutError as exc:
+        task.status = TaskStatus.FAILED
+        task.error = ErrorResponse(error_code="TIMEOUT", message=str(exc))
     except InvalidImageError as exc:
         task.status = TaskStatus.FAILED
         task.error = ErrorResponse(error_code="INVALID_IMAGE", message=str(exc))
@@ -227,7 +299,7 @@ def _run_prediction_task(task_id: str, image_path: Path, settings: Settings) -> 
         task.status = TaskStatus.FAILED
         task.error = ErrorResponse(error_code="INTERNAL_ERROR", message=str(exc))
     finally:
-        image_path.unlink(missing_ok=True)
+        _unlink_quietly(image_path)
 
 
 @app.post("/tasks", response_model=TaskStatusResponse, responses=_TASK_ERROR_RESPONSES)
@@ -247,9 +319,11 @@ async def create_task(
     )
     _TASKS[task_id] = task
 
+    content = await file.read()
+    _ensure_file_size(content, settings)
     suffix = Path(filename).suffix.lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
+        tmp.write(content)
         tmp_path = Path(tmp.name)
 
     background_tasks.add_task(_run_prediction_task, task_id, tmp_path, settings)

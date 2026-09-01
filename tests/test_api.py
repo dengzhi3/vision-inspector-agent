@@ -7,6 +7,7 @@ app.api.predict_image，避免加载真实 YOLO 模型，保证测试快速、�
 
 from __future__ import annotations
 
+import time
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
@@ -158,16 +159,20 @@ def test_prediction_model_not_found(client, monkeypatch):
 
 
 def test_openapi_declares_error_response():
-    """OpenAPI 中 /predictions 的 400/500 响应应引用 ErrorResponse schema。"""
+    """OpenAPI 中 /predictions 的 400/500/504 响应应引用 ErrorResponse schema。"""
     schema = app.openapi()
     responses = schema["paths"]["/predictions"]["post"]["responses"]
 
     assert "400" in responses
     assert "500" in responses
+    assert "504" in responses
     assert responses["400"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "/ErrorResponse"
     )
     assert responses["500"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ErrorResponse"
+    )
+    assert responses["504"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "/ErrorResponse"
     )
     assert "ErrorResponse" in schema["components"]["schemas"]
@@ -572,3 +577,104 @@ def test_openapi_declares_task_not_found_response():
     assert responses["404"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "/ErrorResponse"
     )
+
+
+def test_prediction_rejects_oversized_file(client, monkeypatch):
+    """上传超过大小限制的图片应返回 400 FILE_TOO_LARGE，且不进入推理。"""
+    monkeypatch.setenv("VISION_MAX_FILE_SIZE_MB", "1")
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("large.png", b"x" * (1024 * 1024 + 1), "image/png")},
+    )
+
+    _assert_error_response(resp, 400, "FILE_TOO_LARGE", "图片大小超过限制（最大 1 MB）")
+    fake.assert_not_called()
+
+
+def test_batch_prediction_rejects_oversized_file(client, monkeypatch):
+    """批量上传中任一文件超过大小限制时，整个请求返回 400 FILE_TOO_LARGE。"""
+    monkeypatch.setenv("VISION_MAX_FILE_SIZE_MB", "1")
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", ("large.png", b"x" * (1024 * 1024 + 1), "image/png")),
+            ("files", ("small.png", _png_bytes(), "image/png")),
+        ],
+    )
+
+    _assert_error_response(resp, 400, "FILE_TOO_LARGE", "图片大小超过限制（最大 1 MB）")
+    fake.assert_not_called()
+
+
+def test_task_rejects_oversized_file(client, monkeypatch):
+    """创建任务时上传超过大小限制的图片应返回 400 FILE_TOO_LARGE，不创建后台任务。"""
+    monkeypatch.setenv("VISION_MAX_FILE_SIZE_MB", "1")
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/tasks",
+        files={"file": ("large.png", b"x" * (1024 * 1024 + 1), "image/png")},
+    )
+
+    _assert_error_response(resp, 400, "FILE_TOO_LARGE", "图片大小超过限制（最大 1 MB）")
+    fake.assert_not_called()
+
+
+def test_prediction_timeout(client, monkeypatch):
+    """预测超过配置的时间限制时应返回 504 TIMEOUT。"""
+    monkeypatch.setenv("VISION_PREDICTION_TIMEOUT", "0.1")
+    fake = mock.Mock(side_effect=lambda *args, **kwargs: time.sleep(1))
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("slow.png", _png_bytes(), "image/png")},
+    )
+
+    _assert_error_response(resp, 504, "TIMEOUT", "预测超时（超过 0.1 秒）")
+
+
+def test_batch_prediction_timeout(client, monkeypatch):
+    """批量预测中任一张图片超时，整个请求应返回 504 TIMEOUT。"""
+    monkeypatch.setenv("VISION_PREDICTION_TIMEOUT", "0.1")
+    fake = mock.Mock(side_effect=lambda *args, **kwargs: time.sleep(1))
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", ("slow.png", _png_bytes(), "image/png")),
+        ],
+    )
+
+    _assert_error_response(resp, 504, "TIMEOUT", "预测超时（超过 0.1 秒）")
+
+
+def test_task_timeout_failed(client, monkeypatch):
+    """后台预测超时时，任务状态应变为 failed 并携带 TIMEOUT 错误。"""
+    monkeypatch.setenv("VISION_PREDICTION_TIMEOUT", "0.1")
+    fake = mock.Mock(side_effect=lambda *args, **kwargs: time.sleep(1))
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    created = client.post(
+        "/tasks",
+        files={"file": ("slow.png", _png_bytes(), "image/png")},
+    )
+    task_id = created.json()["task_id"]
+
+    status = client.get(f"/tasks/{task_id}")
+
+    assert status.status_code == 200
+    assert status.json()["status"] == "failed"
+    assert status.json()["result"] is None
+    assert status.json()["error"] == {
+        "error_code": "TIMEOUT",
+        "message": "预测超时（超过 0.1 秒）",
+    }
