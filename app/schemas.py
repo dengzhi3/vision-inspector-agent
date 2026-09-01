@@ -139,6 +139,31 @@ class PredictionResponse(DetectionResult):
     model_config = ConfigDict(extra="forbid")
 
 
+class BatchItem(BaseModel):
+    """批量预测中单个文件的预测结果。"""
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(
+        description="Original uploaded filename",
+    )
+    result: PredictionResponse = Field(
+        description="Prediction result for this file",
+    )
+
+
+class BatchResponse(BaseModel):
+    """POST /predictions/batch 的响应结构。"""
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[BatchItem] = Field(
+        description="Prediction results in upload order",
+    )
+    total: int = Field(
+        ge=0,
+        description="Number of images processed",
+    )
+
+
 class ErrorResponse(BaseModel):
     error_code: str = Field(
         description="Machine-readable error code",

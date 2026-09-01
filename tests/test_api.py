@@ -284,3 +284,183 @@ def test_prediction_response_structure_with_detections(client, monkeypatch):
             }
         ],
     }
+
+
+def test_batch_prediction_multiple_images(client, monkeypatch):
+    """批量上传多张图片应按上传顺序逐张预测，返回每个文件对应的预测结果。"""
+    fake = mock.Mock(
+        side_effect=[
+            DetectionResult(image_width=320, image_height=240, inference_time_ms=12.3),
+            DetectionResult(
+                image_width=640,
+                image_height=480,
+                inference_time_ms=25.7,
+                detections=[
+                    Detection(
+                        class_id=0,
+                        class_name="crack",
+                        confidence=0.9,
+                        bbox=[1, 2, 30, 40],
+                    )
+                ],
+            ),
+        ]
+    )
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", ("a.png", _png_bytes(320, 240), "image/png")),
+            ("files", ("b.png", _png_bytes(640, 480), "image/png")),
+        ],
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    assert [item["filename"] for item in body["results"]] == ["a.png", "b.png"]
+    assert body["results"][0]["result"] == {
+        "image_width": 320,
+        "image_height": 240,
+        "inference_time_ms": 12.3,
+        "detections": [],
+    }
+    assert body["results"][1]["result"] == {
+        "image_width": 640,
+        "image_height": 480,
+        "inference_time_ms": 25.7,
+        "detections": [
+            {
+                "class_id": 0,
+                "class_name": "crack",
+                "confidence": 0.9,
+                "bbox": [1, 2, 30, 40],
+            }
+        ],
+    }
+    # 逐张顺序预测：每次调用后对应的临时文件都应已清理
+    assert fake.call_count == 2
+    assert all(not call.args[0].exists() for call in fake.call_args_list)
+
+
+def test_batch_prediction_rejects_wrong_mime_type(client, monkeypatch):
+    """批量上传中任一文件 MIME 类型非法时返回 400，且不会开始推理。"""
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", ("notes.txt", b"hello", "text/plain")),
+            ("files", ("a.png", _png_bytes(), "image/png")),
+        ],
+    )
+
+    _assert_error_response(resp, 400, "INVALID_IMAGE", "不支持的图片 MIME 类型: 'text/plain'")
+    fake.assert_not_called()
+
+
+def test_batch_prediction_propagates_prediction_error(client, monkeypatch):
+    """批量预测中某张图片推理失败时，整个请求按单图错误规则返回 400。"""
+    fake = mock.Mock(
+        side_effect=[
+            DetectionResult(image_width=320, image_height=240, inference_time_ms=1.0),
+            InvalidImageError("图片无法解码"),
+        ]
+    )
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", ("a.png", _png_bytes(), "image/png")),
+            ("files", ("b.png", _png_bytes(), "image/png")),
+        ],
+    )
+
+    _assert_error_response(resp, 400, "INVALID_IMAGE", "图片无法解码")
+
+
+def test_batch_prediction_max_ten_files(client, monkeypatch):
+    """恰好 10 张图片应被接受并逐张预测。"""
+    fake = mock.Mock(
+        return_value=DetectionResult(
+            image_width=320,
+            image_height=240,
+            inference_time_ms=1.0,
+        )
+    )
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", (f"img{i}.png", _png_bytes(), "image/png"))
+            for i in range(10)
+        ],
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 10
+    assert fake.call_count == 10
+
+
+def test_batch_prediction_rejects_more_than_ten_files(client, monkeypatch):
+    """超过 10 张图片应返回 400 TOO_MANY_FILES，且不进入推理。"""
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", (f"img{i}.png", _png_bytes(), "image/png"))
+            for i in range(11)
+        ],
+    )
+
+    _assert_error_response(resp, 400, "TOO_MANY_FILES", "一次最多上传 10 张图片")
+    fake.assert_not_called()
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_batch_prediction_success_counts(client, monkeypatch, count):
+    """批量上传 1 张或 3 张图片都应成功，返回按上传顺序排列的结果。"""
+    fake = mock.Mock(
+        return_value=DetectionResult(
+            image_width=320,
+            image_height=240,
+            inference_time_ms=1.0,
+        )
+    )
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/predictions/batch",
+        files=[
+            ("files", (f"img{i}.png", _png_bytes(), "image/png"))
+            for i in range(count)
+        ],
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == count
+    assert [item["filename"] for item in body["results"]] == [
+        f"img{i}.png" for i in range(count)
+    ]
+    assert fake.call_count == count
+    # 每张预测完成后临时文件都应已清理
+    assert all(not call.args[0].exists() for call in fake.call_args_list)
+
+
+def test_batch_prediction_empty_files_rejected(client, monkeypatch):
+    """files 字段缺失（空文件列表）时，FastAPI 在参数校验阶段拒绝（422），不进入推理。"""
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post("/predictions/batch")
+
+    assert resp.status_code == 422
+    fake.assert_not_called()

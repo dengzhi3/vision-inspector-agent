@@ -9,6 +9,8 @@ from app.config import Settings
 from app.model_loader import ModelNotFoundError
 from app.predictor import InvalidImageError, predict_image
 from app.schemas import (
+    BatchItem,
+    BatchResponse,
     ErrorResponse,
     HealthResponse,
     InferenceConfig,
@@ -33,6 +35,15 @@ SUPPORTED_IMAGE_MIME_TYPES = {
     "image/tiff",
     "image/webp",
 }
+
+# 批量接口单次上传的图片数量上限
+MAX_BATCH_FILES = 10
+
+
+def _ensure_supported_mime_type(file: UploadFile) -> None:
+    """拒绝非图片 MIME 类型的上传，抛 InvalidImageError 由统一异常处理器转为 400。"""
+    if file.content_type not in SUPPORTED_IMAGE_MIME_TYPES:
+        raise InvalidImageError(f"不支持的图片 MIME 类型: {file.content_type!r}")
 
 
 def _error_response(status_code: int, error_code: str, message: str) -> JSONResponse:
@@ -71,7 +82,10 @@ async def model_not_found_error_handler(
 _ERROR_RESPONSES: dict[int, dict[str, object]] = {
     400: {
         "model": ErrorResponse,
-        "description": "上传的图片无效或无法解码推理（INVALID_IMAGE）",
+        "description": (
+            "上传的图片无效或无法解码推理（INVALID_IMAGE），"
+            "或批量上传超过数量上限（TOO_MANY_FILES）"
+        ),
     },
     500: {
         "model": ErrorResponse,
@@ -123,8 +137,7 @@ async def upload(file: UploadFile):
 async def create_prediction(file: UploadFile = File(...)) -> PredictionResponse:
     """上传单张图片，临时落盘后调用 app.predictor.predict_image() 推理，返回统一 JSON 结果。"""
     settings = Settings.from_env()
-    if file.content_type not in SUPPORTED_IMAGE_MIME_TYPES:
-        raise InvalidImageError(f"不支持的图片 MIME 类型: {file.content_type!r}")
+    _ensure_supported_mime_type(file)
     suffix = Path(file.filename or "").suffix.lower()
     tmp_path: Path | None = None
     try:
@@ -137,3 +150,45 @@ async def create_prediction(file: UploadFile = File(...)) -> PredictionResponse:
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
+
+
+@app.post(
+    "/predictions/batch",
+    response_model=BatchResponse,
+    responses=_ERROR_RESPONSES,
+)
+async def create_batch_prediction(files: list[UploadFile] = File(...)) -> BatchResponse:
+    """一次性上传多张图片，逐张顺序预测，按上传顺序返回每个文件的结果。
+
+    不使用 asyncio.gather：每张图片依次推理，任一张失败即按单图错误规则
+    抛出异常（400 INVALID_IMAGE / 500 MODEL_NOT_FOUND），整个请求失败。
+    """
+    if len(files) > MAX_BATCH_FILES:
+        return _error_response(
+            status_code=400,
+            error_code="TOO_MANY_FILES",
+            message=f"一次最多上传 {MAX_BATCH_FILES} 张图片",
+        )
+    settings = Settings.from_env()
+    results: list[BatchItem] = []
+    for file in files:
+        _ensure_supported_mime_type(file)
+        suffix = Path(file.filename or "").suffix.lower()
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(await file.read())
+                tmp_path = Path(tmp.name)
+
+            result = await run_in_threadpool(predict_image, tmp_path, settings=settings)
+            results.append(
+                BatchItem(
+                    filename=file.filename or "",
+                    result=PredictionResponse(**result.to_dict()),
+                )
+            )
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    return BatchResponse(results=results, total=len(results))
