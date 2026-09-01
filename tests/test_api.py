@@ -155,3 +155,19 @@ def test_prediction_model_not_found(client, monkeypatch):
     )
 
     _assert_error_response(resp, 500, "MODEL_NOT_FOUND", "模型文件不存在")
+
+
+def test_openapi_declares_error_response():
+    """OpenAPI 中 /predictions 的 400/500 响应应引用 ErrorResponse schema。"""
+    schema = app.openapi()
+    responses = schema["paths"]["/predictions"]["post"]["responses"]
+
+    assert "400" in responses
+    assert "500" in responses
+    assert responses["400"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ErrorResponse"
+    )
+    assert responses["500"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ErrorResponse"
+    )
+    assert "ErrorResponse" in schema["components"]["schemas"]

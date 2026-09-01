@@ -57,6 +57,19 @@ async def model_not_found_error_handler(
     )
 
 
+# OpenAPI 中声明的错误响应，统一引用 ErrorResponse schema
+_ERROR_RESPONSES: dict[int, dict[str, object]] = {
+    400: {
+        "model": ErrorResponse,
+        "description": "上传的图片无效或无法解码推理（INVALID_IMAGE）",
+    },
+    500: {
+        "model": ErrorResponse,
+        "description": "模型权重文件缺失（MODEL_NOT_FOUND）",
+    },
+}
+
+
 @app.get("/")
 def root():
     return {"message": "Vision Inspector API"}
@@ -96,7 +109,7 @@ async def upload(file: UploadFile):
     }
 
 
-@app.post("/predictions", response_model=PredictionResponse)
+@app.post("/predictions", response_model=PredictionResponse, responses=_ERROR_RESPONSES)
 async def create_prediction(file: UploadFile = File(...)) -> PredictionResponse:
     """上传单张图片，临时落盘后调用 app.predictor.predict_image() 推理，返回统一 JSON 结果。"""
     settings = Settings.from_env()
