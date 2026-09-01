@@ -661,3 +661,20 @@ VisionInspector Agent
 
 ```bash
 uv run uvicorn app.api:app --reload
+
+
+## API Schema Validation
+
+VisionInspector uses Pydantic models to define and validate
+the data contract between the YOLO inference layer and FastAPI.
+
+Current schemas include:
+
+- Detection
+- DetectionResult
+- PredictionResponse
+- ModelInfoResponse
+- ErrorResponse
+
+Detection confidence and bounding box values are validated
+before being exposed through the API.
