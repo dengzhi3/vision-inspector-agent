@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 
@@ -170,4 +172,37 @@ class ErrorResponse(BaseModel):
     )
     message: str = Field(
         description="Human-readable error message",
+    )
+
+
+class TaskStatus(str, Enum):
+    """异步任务的运行状态。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class TaskStatusResponse(BaseModel):
+    """任务状态查询的响应结构。"""
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = Field(
+        description="Task identifier",
+    )
+    status: TaskStatus = Field(
+        description="Current task status",
+    )
+    filename: str | None = Field(
+        default=None,
+        description="Original uploaded filename",
+    )
+    result: PredictionResponse | None = Field(
+        default=None,
+        description="Prediction result when the task is completed",
+    )
+    error: ErrorResponse | None = Field(
+        default=None,
+        description="Error info when the task failed",
     )

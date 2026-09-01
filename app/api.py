@@ -1,7 +1,8 @@
 import tempfile
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -17,6 +18,8 @@ from app.schemas import (
     ModelFileInfo,
     ModelInfoResponse,
     PredictionResponse,
+    TaskStatus,
+    TaskStatusResponse,
 )
 
 
@@ -90,6 +93,18 @@ _ERROR_RESPONSES: dict[int, dict[str, object]] = {
     500: {
         "model": ErrorResponse,
         "description": "模型权重文件缺失（MODEL_NOT_FOUND）",
+    },
+}
+
+# 简单版本：任务状态保存在进程内存中，服务重启后任务记录丢失
+_TASKS: dict[str, TaskStatusResponse] = {}
+
+# /tasks 接口的错误响应：在通用 400/500 之外增加 404
+_TASK_ERROR_RESPONSES: dict[int, dict[str, object]] = {
+    **_ERROR_RESPONSES,
+    404: {
+        "model": ErrorResponse,
+        "description": "任务不存在（TASK_NOT_FOUND）",
     },
 }
 
@@ -192,3 +207,63 @@ async def create_batch_prediction(files: list[UploadFile] = File(...)) -> BatchR
                 tmp_path.unlink(missing_ok=True)
 
     return BatchResponse(results=results, total=len(results))
+
+
+def _run_prediction_task(task_id: str, image_path: Path, settings: Settings) -> None:
+    """后台执行单张图片预测并更新任务状态，无论成败都清理临时文件。"""
+    task = _TASKS[task_id]
+    task.status = TaskStatus.RUNNING
+    try:
+        result = predict_image(image_path, settings=settings)
+        task.result = PredictionResponse(**result.to_dict())
+        task.status = TaskStatus.COMPLETED
+    except InvalidImageError as exc:
+        task.status = TaskStatus.FAILED
+        task.error = ErrorResponse(error_code="INVALID_IMAGE", message=str(exc))
+    except ModelNotFoundError as exc:
+        task.status = TaskStatus.FAILED
+        task.error = ErrorResponse(error_code="MODEL_NOT_FOUND", message=str(exc))
+    except Exception as exc:  # 兜底：保证任务不会停留在 running
+        task.status = TaskStatus.FAILED
+        task.error = ErrorResponse(error_code="INTERNAL_ERROR", message=str(exc))
+    finally:
+        image_path.unlink(missing_ok=True)
+
+
+@app.post("/tasks", response_model=TaskStatusResponse, responses=_TASK_ERROR_RESPONSES)
+async def create_task(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+) -> TaskStatusResponse:
+    """上传一张图片创建异步预测任务：立即返回 pending，后台完成后通过状态接口查询。"""
+    _ensure_supported_mime_type(file)
+    settings = Settings.from_env()
+    task_id = uuid.uuid4().hex
+    filename = file.filename or ""
+    task = TaskStatusResponse(
+        task_id=task_id,
+        status=TaskStatus.PENDING,
+        filename=filename,
+    )
+    _TASKS[task_id] = task
+
+    suffix = Path(filename).suffix.lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await file.read())
+        tmp_path = Path(tmp.name)
+
+    background_tasks.add_task(_run_prediction_task, task_id, tmp_path, settings)
+    return task
+
+
+@app.get("/tasks/{task_id}", response_model=TaskStatusResponse, responses=_TASK_ERROR_RESPONSES)
+def get_task_status(task_id: str) -> TaskStatusResponse:
+    """查询任务当前状态与结果。"""
+    task = _TASKS.get(task_id)
+    if task is None:
+        return _error_response(
+            status_code=404,
+            error_code="TASK_NOT_FOUND",
+            message=f"任务不存在: {task_id}",
+        )
+    return task

@@ -464,3 +464,111 @@ def test_batch_prediction_empty_files_rejected(client, monkeypatch):
 
     assert resp.status_code == 422
     fake.assert_not_called()
+
+
+def test_task_create_returns_pending_then_completed(client, monkeypatch):
+    """创建任务应立即返回 pending，后台预测完成后查询得到 completed 与结果。"""
+    fake = mock.Mock(
+        return_value=DetectionResult(
+            image_width=320,
+            image_height=240,
+            inference_time_ms=5.0,
+        )
+    )
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    created = client.post(
+        "/tasks",
+        files={"file": ("valid.png", _png_bytes(), "image/png")},
+    )
+
+    assert created.status_code == 200
+    task_id = created.json()["task_id"]
+    assert created.json() == {
+        "task_id": task_id,
+        "status": "pending",
+        "filename": "valid.png",
+        "result": None,
+        "error": None,
+    }
+
+    status = client.get(f"/tasks/{task_id}")
+
+    assert status.status_code == 200
+    assert status.json() == {
+        "task_id": task_id,
+        "status": "completed",
+        "filename": "valid.png",
+        "result": {
+            "image_width": 320,
+            "image_height": 240,
+            "inference_time_ms": 5.0,
+            "detections": [],
+        },
+        "error": None,
+    }
+    # 后台任务执行完成后临时文件应已清理
+    assert fake.call_count == 1
+    assert not fake.call_args.args[0].exists()
+
+
+@pytest.mark.parametrize(
+    ("exc", "error_code", "message"),
+    [
+        (InvalidImageError("图片无法解码"), "INVALID_IMAGE", "图片无法解码"),
+        (ModelNotFoundError("模型文件不存在"), "MODEL_NOT_FOUND", "模型文件不存在"),
+    ],
+)
+def test_task_failed_status(client, monkeypatch, exc, error_code, message):
+    """后台预测失败时，任务状态应变为 failed 并携带对应错误信息。"""
+    fake = mock.Mock(side_effect=exc)
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    created = client.post(
+        "/tasks",
+        files={"file": ("broken.png", _png_bytes(), "image/png")},
+    )
+    task_id = created.json()["task_id"]
+
+    status = client.get(f"/tasks/{task_id}")
+
+    assert status.status_code == 200
+    assert status.json()["status"] == "failed"
+    assert status.json()["result"] is None
+    assert status.json()["error"] == {
+        "error_code": error_code,
+        "message": message,
+    }
+
+
+def test_task_not_found(client):
+    """查询不存在的任务应返回 404 TASK_NOT_FOUND。"""
+
+    resp = client.get("/tasks/does-not-exist")
+
+    _assert_error_response(resp, 404, "TASK_NOT_FOUND", "任务不存在: does-not-exist")
+
+
+def test_task_rejects_wrong_mime_type(client, monkeypatch):
+    """创建任务时上传非图片 MIME 类型应返回 400，且不会创建后台任务。"""
+    fake = mock.Mock()
+    monkeypatch.setattr("app.api.predict_image", fake)
+
+    resp = client.post(
+        "/tasks",
+        files={"file": ("valid.png", _png_bytes(), "text/plain")},
+    )
+
+    _assert_error_response(resp, 400, "INVALID_IMAGE", "不支持的图片 MIME 类型: 'text/plain'")
+    fake.assert_not_called()
+
+
+def test_openapi_declares_task_not_found_response():
+    """OpenAPI 中 GET /tasks/{task_id} 的 404 响应应引用 ErrorResponse schema。"""
+    schema = app.openapi()
+    responses = schema["paths"]["/tasks/{task_id}"]["get"]["responses"]
+
+    assert "404" in responses
+    assert responses["404"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/ErrorResponse"
+    )
