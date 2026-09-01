@@ -8,6 +8,8 @@
     VISION_IMAGE_SIZE   推理输入尺寸（默认 640）
     VISION_DEVICE       推理设备：cpu / 0 / cuda:0（默认 None，自动选择）
     VISION_OUTPUT_DIR   批量预测结果输出目录（默认 outputs/）
+    VISION_MAX_FILE_SIZE_MB  单张上传图片大小上限（默认 10 MB）
+    VISION_PREDICTION_TIMEOUT  单张图片预测超时（秒，默认 30）
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ from pathlib import Path
 
 # 项目根目录（app/ 的上一级）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# 单张上传图片的大小上限（MB），可通过 VISION_MAX_FILE_SIZE_MB 覆盖
+DEFAULT_MAX_FILE_SIZE_MB = 10
 
 
 def _env_float(name: str, default: float) -> float:
@@ -40,6 +45,8 @@ class Settings:
     image_size: int = 640
     device: str | None = None  # None 表示让 ultralytics 自动选择设备
     output_dir: Path = PROJECT_ROOT / "outputs"
+    max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_MB * 1024 * 1024  # 单张上传图片大小上限（字节）
+    prediction_timeout_seconds: float = 30.0  # 单张图片预测超时（秒）
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -51,5 +58,10 @@ class Settings:
             image_size=_env_int("VISION_IMAGE_SIZE", cls.image_size),
             device=os.getenv("VISION_DEVICE") or None,
             output_dir=Path(os.getenv("VISION_OUTPUT_DIR", str(cls.output_dir))),
+            max_file_size_bytes=(
+                _env_int("VISION_MAX_FILE_SIZE_MB", DEFAULT_MAX_FILE_SIZE_MB) * 1024 * 1024
+            ),
+            prediction_timeout_seconds=_env_float(
+                "VISION_PREDICTION_TIMEOUT", cls.prediction_timeout_seconds
+            ),
         )
-
