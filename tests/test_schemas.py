@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from app.schemas import Detection, DetectionResult
+from app.schemas import (
+    Detection,
+    DetectionResult,
+    HealthResponse,
+    ModelInfoResponse,
+    PredictionResponse,
+)
 
 
 @pytest.fixture
@@ -162,3 +168,76 @@ def test_detection_result_validation(detection_result_kwargs, overrides):
     """DetectionResult 的 Field 约束应拒绝非法字段值。"""
     with pytest.raises(ValidationError):
         DetectionResult(**{**detection_result_kwargs, **overrides})
+
+
+@pytest.mark.parametrize(
+    ("model", "valid_kwargs"),
+    [
+        (HealthResponse, {}),
+        (
+            Detection,
+            {
+                "class_id": 0,
+                "class_name": "crack",
+                "confidence": 0.91,
+                "bbox": [120, 80, 600, 420],
+            },
+        ),
+        (
+            DetectionResult,
+            {
+                "image_width": 640,
+                "image_height": 480,
+                "inference_time_ms": 45.0,
+            },
+        ),
+        (
+            PredictionResponse,
+            {
+                "image_width": 640,
+                "image_height": 480,
+                "inference_time_ms": 45.0,
+            },
+        ),
+        (
+            ModelInfoResponse,
+            {
+                "model": {"path": "models/yolo.pt", "exists": True},
+                "inference": {
+                    "confidence_threshold": 0.5,
+                    "iou_threshold": 0.45,
+                    "image_size": 640,
+                },
+                "output_dir": "outputs",
+            },
+        ),
+    ],
+    ids=[
+        "HealthResponse",
+        "Detection",
+        "DetectionResult",
+        "PredictionResponse",
+        "ModelInfoResponse",
+    ],
+)
+def test_extra_fields_forbidden(model, valid_kwargs):
+    """配置了 model_config = ConfigDict(extra="forbid") 的模型应拒绝未知字段。"""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        model(**valid_kwargs, unexpected_field="boom")
+
+
+def test_detection_result_rejects_unknown_nested_fields(detection_result_kwargs):
+    """extra="forbid" 同样作用于嵌套模型，detections 内的未知字段也应被拒绝。"""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        DetectionResult(
+            **detection_result_kwargs,
+            detections=[
+                {
+                    "class_id": 0,
+                    "class_name": "crack",
+                    "confidence": 0.91,
+                    "bbox": [120, 80, 600, 420],
+                    "unexpected_field": "boom",
+                }
+            ],
+        )

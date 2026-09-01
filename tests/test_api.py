@@ -19,7 +19,7 @@ from app.api import app
 from app.config import Settings
 from app.model_loader import ModelNotFoundError
 from app.predictor import InvalidImageError
-from app.schemas import DetectionResult
+from app.schemas import DetectionResult, ErrorResponse
 
 
 def _png_bytes(width: int = 320, height: int = 240) -> bytes:
@@ -27,6 +27,20 @@ def _png_bytes(width: int = 320, height: int = 240) -> bytes:
     buf = BytesIO()
     Image.new("RGB", (width, height), "white").save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _assert_error_response(
+    resp, status_code: int, error_code: str, message: str
+) -> None:
+    """断言响应符合 ErrorResponse schema，且字段内容与预期一致。"""
+    body = resp.json()
+
+    assert resp.status_code == status_code
+    # ErrorResponse 只应有 error_code 与 message 两个字段，不允许多余字段
+    assert set(body) == {"error_code", "message"}
+    parsed = ErrorResponse.model_validate(body)
+    assert parsed.error_code == error_code
+    assert parsed.message == message
 
 
 @pytest.fixture
@@ -112,7 +126,7 @@ def test_prediction_valid_image(client, valid_png, monkeypatch):
 
 
 def test_prediction_invalid_file(client, monkeypatch):
-    """上传无法解码的图片时，API 应映射为 400 响应。"""
+    """上传无法解码的图片时，API 应返回 400，响应体符合 ErrorResponse schema。"""
 
     def _raise_invalid(*args, **kwargs):
         raise InvalidImageError("图片无法解码或推理失败")
@@ -124,12 +138,11 @@ def test_prediction_invalid_file(client, monkeypatch):
         files={"file": ("broken.png", b"this is not a png", "image/png")},
     )
 
-    assert resp.status_code == 400
-    assert resp.json() == {"detail": "图片无法解码或推理失败"}
+    _assert_error_response(resp, 400, "INVALID_IMAGE", "图片无法解码或推理失败")
 
 
 def test_prediction_model_not_found(client, monkeypatch):
-    """模型文件缺失时，API 应返回 500 而不是未捕获异常。"""
+    """模型文件缺失时，API 应返回 500，响应体符合 ErrorResponse schema。"""
 
     def _raise_model(*args, **kwargs):
         raise ModelNotFoundError("模型文件不存在")
@@ -141,5 +154,4 @@ def test_prediction_model_not_found(client, monkeypatch):
         files={"file": ("valid.png", _png_bytes(), "image/png")},
     )
 
-    assert resp.status_code == 500
-    assert resp.json() == {"detail": "模型文件不存在"}
+    _assert_error_response(resp, 500, "MODEL_NOT_FOUND", "模型文件不存在")
