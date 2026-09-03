@@ -5,9 +5,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from app.config import Settings
-from app.model_loader import load_model
-from app.schemas import Detection, DetectionResult
+from app.core.config import Settings
+from app.schemas.prediction import Detection, DetectionResult
+from app.vision.model_loader import load_model
 
 SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -96,4 +96,3 @@ def predict_directory(
     for image in images:
         results[image.name] = predict_image(image, settings=settings)
     return results
-

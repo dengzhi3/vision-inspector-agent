@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -13,6 +13,7 @@ class HealthResponse(BaseModel):
     status: str = "ok"
 
     model_config = ConfigDict(extra="forbid")
+
 
 class Detection(BaseModel):
     """单个检测框。"""
@@ -167,6 +168,8 @@ class BatchResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
+    """统一错误响应结构。"""
+
     error_code: str = Field(
         description="Machine-readable error code",
     )
@@ -205,4 +208,42 @@ class TaskStatusResponse(BaseModel):
     error: ErrorResponse | None = Field(
         default=None,
         description="Error info when the task failed",
+    )
+
+
+class PredictionHistory(BaseModel):
+    """数据库持久化的一条历史预测记录（GET / 查询历史）。"""
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = Field(
+        ge=1,
+        description="prediction_tasks 表主键，可用于查询详情",
+    )
+    status: TaskStatus = Field(
+        description="Prediction task status",
+    )
+    filename: str | None = Field(
+        default=None,
+        description="Original uploaded filename, None when the task has no saved image",
+    )
+    model_name: str | None = Field(
+        default=None,
+        description="Model name used for the prediction",
+    )
+    inference_time_ms: float | None = Field(
+        default=None,
+        ge=0,
+        description="Inference time in milliseconds",
+    )
+    created_at: str = Field(
+        min_length=1,
+        description="Task creation time (ISO 8601 UTC)",
+    )
+    completed_at: str | None = Field(
+        default=None,
+        description="Task completion time (ISO 8601 UTC)",
+    )
+    error_message: str | None = Field(
+        default=None,
+        description="Error message when the task failed",
     )

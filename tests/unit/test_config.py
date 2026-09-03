@@ -1,10 +1,10 @@
-"""app.config 的单元测试。"""
+"""app.core.config 的单元测试。"""
 
 from __future__ import annotations
 
 import pytest
 
-from app.config import Settings
+from app.core.config import Settings
 
 
 @pytest.mark.parametrize(

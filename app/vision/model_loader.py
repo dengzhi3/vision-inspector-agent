@@ -23,4 +23,3 @@ def load_model(model_path: str | Path) -> YOLO:
     if not path.is_file():
         raise ModelNotFoundError(f"模型文件不存在: {path}")
     return YOLO(str(path))
-

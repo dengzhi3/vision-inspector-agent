@@ -20,3 +20,7 @@ outputs/*
 # Model weights
 models/*.pt
 
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
