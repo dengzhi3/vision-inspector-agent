@@ -1,4 +1,4 @@
-"""app.predictor 的单元测试。
+"""app.vision.predictor 的单元测试。
 
 使用 mock 模型代替真实推理，保证测试快速、稳定且不依赖模型文件。
 """
@@ -12,8 +12,8 @@ from unittest import mock
 import pytest
 from PIL import Image
 
-from app.config import Settings
-from app.predictor import InvalidImageError, predict_image
+from app.core.config import Settings
+from app.vision.predictor import InvalidImageError, predict_image
 from app.schemas import Detection, DetectionResult
 
 
@@ -62,7 +62,7 @@ def large_image(tmp_path):
 def model(monkeypatch):
     """打桩 load_model 并返回可编程的 Mock 模型。"""
     fake = mock.Mock()
-    monkeypatch.setattr("app.predictor.load_model", lambda *args, **kwargs: fake)
+    monkeypatch.setattr("app.vision.predictor.load_model", lambda *args, **kwargs: fake)
     return fake
 
 
@@ -103,7 +103,7 @@ def test_predict_missing_image(tmp_path, monkeypatch):
     assert not missing.exists()
 
     loader = mock.Mock()
-    monkeypatch.setattr("app.predictor.load_model", loader)
+    monkeypatch.setattr("app.vision.predictor.load_model", loader)
 
     with pytest.raises(InvalidImageError, match="不存在"):
         predict_image(missing)

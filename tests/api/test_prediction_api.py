@@ -1,8 +1,8 @@
-"""app.api 的接口测试。
+"""app.api 预测接口的测试。
 
 使用 FastAPI TestClient 直接调用路由，并通过 monkeypatch 替换
-app.api.predict_image，避免加载真实 YOLO 模型，保证测试快速、稳定。
-预测器内部的异常行为（图片解码失败等）已由 tests/test_predictor.py 覆盖。
+app.services.prediction.predict_image，避免加载真实 YOLO 模型，保证测试快速、稳定。
+预测器内部的异常行为（图片解码失败等）已由 tests/unit/test_predictor.py 覆盖。
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.api import app
-from app.config import Settings
-from app.model_loader import ModelNotFoundError
-from app.predictor import InvalidImageError
+from app.main import app
+from app.core.config import Settings
+from app.vision.model_loader import ModelNotFoundError
+from app.vision.predictor import InvalidImageError
 from app.schemas import Detection, DetectionResult, ErrorResponse
 
 
@@ -52,6 +52,41 @@ def client():
 @pytest.fixture
 def valid_png() -> bytes:
     return _png_bytes()
+
+
+@pytest.fixture(autouse=True)
+def db_repositories(monkeypatch):
+    """把 api 用到的数据库仓库函数与事务替换成 Mock，避免测试写入真实 SQLite。
+
+    事务按调用顺序返回 connection_1 / connection_2，便于断言写操作
+    分别落在事务 1（模型版本+任务）和事务 2（图片+检测+完成状态）里。
+    """
+    names = [
+        "get_or_create_model_version",
+        "create_prediction_task",
+        "save_image",
+        "save_detections",
+        "update_prediction_task_status",
+    ]
+    mocks = {name: mock.Mock() for name in names}
+    for name, repo_mock in mocks.items():
+        monkeypatch.setattr(f"app.services.prediction.{name}", repo_mock)
+
+    transaction_mock = mock.MagicMock()
+    mocks["transaction"] = transaction_mock
+    mocks["connection_1"] = mock.MagicMock()
+    mocks["connection_2"] = mock.MagicMock()
+
+    # api 调用 transaction() 得到上下文管理器，with 进入时依次返回两个连接
+    context_manager = mock.MagicMock()
+    mocks["context_manager"] = context_manager
+    context_manager.__enter__.side_effect = [
+        mocks["connection_1"],
+        mocks["connection_2"],
+    ]
+    transaction_mock.return_value = context_manager
+    monkeypatch.setattr("app.services.prediction.transaction", transaction_mock)
+    return mocks
 
 
 def test_health(client):
@@ -103,7 +138,7 @@ def test_prediction_valid_image(client, valid_png, monkeypatch):
             inference_time_ms=12.3,
         )
     )
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions",
@@ -132,7 +167,7 @@ def test_prediction_invalid_file(client, monkeypatch):
     def _raise_invalid(*args, **kwargs):
         raise InvalidImageError("图片无法解码或推理失败")
 
-    monkeypatch.setattr("app.api.predict_image", _raise_invalid)
+    monkeypatch.setattr("app.services.prediction.predict_image", _raise_invalid)
 
     resp = client.post(
         "/predictions",
@@ -148,7 +183,7 @@ def test_prediction_model_not_found(client, monkeypatch):
     def _raise_model(*args, **kwargs):
         raise ModelNotFoundError("模型文件不存在")
 
-    monkeypatch.setattr("app.api.predict_image", _raise_model)
+    monkeypatch.setattr("app.services.prediction.predict_image", _raise_model)
 
     resp = client.post(
         "/predictions",
@@ -197,7 +232,7 @@ def test_prediction_empty_file(client, monkeypatch):
     """上传空文件时推理应失败，API 返回 400 且响应体符合 ErrorResponse schema。"""
     model = mock.Mock()
     model.predict.side_effect = RuntimeError("decode failed")
-    monkeypatch.setattr("app.predictor.load_model", lambda *args, **kwargs: model)
+    monkeypatch.setattr("app.vision.predictor.load_model", lambda *args, **kwargs: model)
 
     resp = client.post(
         "/predictions",
@@ -240,7 +275,7 @@ def test_prediction_wrong_mime_type(client, monkeypatch, valid_png):
     """声明了非图片 MIME 类型（text/plain）时，即使扩展名合法也应返回 400，
     且不会进入推理阶段。"""
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions",
@@ -268,7 +303,7 @@ def test_prediction_response_structure_with_detections(client, monkeypatch):
             ],
         )
     )
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions",
@@ -311,7 +346,7 @@ def test_batch_prediction_multiple_images(client, monkeypatch):
             ),
         ]
     )
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -352,7 +387,7 @@ def test_batch_prediction_multiple_images(client, monkeypatch):
 def test_batch_prediction_rejects_wrong_mime_type(client, monkeypatch):
     """批量上传中任一文件 MIME 类型非法时返回 400，且不会开始推理。"""
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -374,7 +409,7 @@ def test_batch_prediction_propagates_prediction_error(client, monkeypatch):
             InvalidImageError("图片无法解码"),
         ]
     )
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -396,7 +431,7 @@ def test_batch_prediction_max_ten_files(client, monkeypatch):
             inference_time_ms=1.0,
         )
     )
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -415,7 +450,7 @@ def test_batch_prediction_max_ten_files(client, monkeypatch):
 def test_batch_prediction_rejects_more_than_ten_files(client, monkeypatch):
     """超过 10 张图片应返回 400 TOO_MANY_FILES，且不进入推理。"""
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -439,7 +474,7 @@ def test_batch_prediction_success_counts(client, monkeypatch, count):
             inference_time_ms=1.0,
         )
     )
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -463,7 +498,7 @@ def test_batch_prediction_success_counts(client, monkeypatch, count):
 def test_batch_prediction_empty_files_rejected(client, monkeypatch):
     """files 字段缺失（空文件列表）时，FastAPI 在参数校验阶段拒绝（422），不进入推理。"""
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post("/predictions/batch")
 
@@ -480,7 +515,7 @@ def test_task_create_returns_pending_then_completed(client, monkeypatch):
             inference_time_ms=5.0,
         )
     )
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     created = client.post(
         "/tasks",
@@ -527,7 +562,7 @@ def test_task_create_returns_pending_then_completed(client, monkeypatch):
 def test_task_failed_status(client, monkeypatch, exc, error_code, message):
     """后台预测失败时，任务状态应变为 failed 并携带对应错误信息。"""
     fake = mock.Mock(side_effect=exc)
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     created = client.post(
         "/tasks",
@@ -557,7 +592,7 @@ def test_task_not_found(client):
 def test_task_rejects_wrong_mime_type(client, monkeypatch):
     """创建任务时上传非图片 MIME 类型应返回 400，且不会创建后台任务。"""
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/tasks",
@@ -583,7 +618,7 @@ def test_prediction_rejects_oversized_file(client, monkeypatch):
     """上传超过大小限制的图片应返回 400 FILE_TOO_LARGE，且不进入推理。"""
     monkeypatch.setenv("VISION_MAX_FILE_SIZE_MB", "1")
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions",
@@ -598,7 +633,7 @@ def test_batch_prediction_rejects_oversized_file(client, monkeypatch):
     """批量上传中任一文件超过大小限制时，整个请求返回 400 FILE_TOO_LARGE。"""
     monkeypatch.setenv("VISION_MAX_FILE_SIZE_MB", "1")
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -616,7 +651,7 @@ def test_task_rejects_oversized_file(client, monkeypatch):
     """创建任务时上传超过大小限制的图片应返回 400 FILE_TOO_LARGE，不创建后台任务。"""
     monkeypatch.setenv("VISION_MAX_FILE_SIZE_MB", "1")
     fake = mock.Mock()
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/tasks",
@@ -631,7 +666,7 @@ def test_prediction_timeout(client, monkeypatch):
     """预测超过配置的时间限制时应返回 504 TIMEOUT。"""
     monkeypatch.setenv("VISION_PREDICTION_TIMEOUT", "0.1")
     fake = mock.Mock(side_effect=lambda *args, **kwargs: time.sleep(1))
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions",
@@ -645,7 +680,7 @@ def test_batch_prediction_timeout(client, monkeypatch):
     """批量预测中任一张图片超时，整个请求应返回 504 TIMEOUT。"""
     monkeypatch.setenv("VISION_PREDICTION_TIMEOUT", "0.1")
     fake = mock.Mock(side_effect=lambda *args, **kwargs: time.sleep(1))
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     resp = client.post(
         "/predictions/batch",
@@ -661,7 +696,7 @@ def test_task_timeout_failed(client, monkeypatch):
     """后台预测超时时，任务状态应变为 failed 并携带 TIMEOUT 错误。"""
     monkeypatch.setenv("VISION_PREDICTION_TIMEOUT", "0.1")
     fake = mock.Mock(side_effect=lambda *args, **kwargs: time.sleep(1))
-    monkeypatch.setattr("app.api.predict_image", fake)
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
 
     created = client.post(
         "/tasks",
@@ -678,3 +713,93 @@ def test_task_timeout_failed(client, monkeypatch):
         "error_code": "TIMEOUT",
         "message": "预测超时（超过 0.1 秒）",
     }
+
+
+def test_prediction_persists_task_and_results(
+    client, monkeypatch, tmp_path, db_repositories
+):
+    """POST /predictions 成功后应写入模型版本、任务、图片与检测结果。"""
+    model_file = tmp_path / "best.pt"
+    monkeypatch.setenv("VISION_MODEL_PATH", str(model_file))
+    fake = mock.Mock(
+        return_value=DetectionResult(
+            image_width=320,
+            image_height=240,
+            inference_time_ms=12.3,
+            detections=[
+                Detection(
+                    class_id=0,
+                    class_name="crack",
+                    confidence=0.9,
+                    bbox=[10, 20, 100, 200],
+                )
+            ],
+        )
+    )
+    monkeypatch.setattr("app.services.prediction.predict_image", fake)
+    db_repositories["get_or_create_model_version"].return_value = 7
+    db_repositories["create_prediction_task"].return_value = 42
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("valid.png", _png_bytes(), "image/png")},
+    )
+
+    assert resp.status_code == 200
+    db_repositories["get_or_create_model_version"].assert_called_once_with(
+        model_name="best",
+        model_path=str(model_file),
+        version="current",
+        connection=db_repositories["connection_1"],
+    )
+    db_repositories["create_prediction_task"].assert_called_once_with(
+        model_version_id=7,
+        status="running",
+        connection=db_repositories["connection_1"],
+    )
+    db_repositories["save_image"].assert_called_once_with(
+        task_id=42,
+        original_path="valid.png",
+        annotated_path=None,
+        width=320,
+        height=240,
+        connection=db_repositories["connection_2"],
+    )
+    db_repositories["save_detections"].assert_called_once()
+    assert (
+        db_repositories["save_detections"].call_args.kwargs["connection"]
+        is db_repositories["connection_2"]
+    )
+    assert len(db_repositories["save_detections"].call_args.kwargs["detections"]) == 1
+    db_repositories["update_prediction_task_status"].assert_called_once_with(
+        task_id=42,
+        status="completed",
+        inference_time_ms=12.3,
+        connection=db_repositories["connection_2"],
+    )
+    # 成功路径应经历两个独立事务
+    assert db_repositories["context_manager"].__enter__.call_count == 2
+
+
+def test_prediction_marks_task_failed_on_error(client, monkeypatch, db_repositories):
+    """预测失败时任务应标记为 failed 并记录错误消息，响应仍为 400。"""
+
+    def _raise_invalid(*args, **kwargs):
+        raise InvalidImageError("图片无法解码")
+
+    monkeypatch.setattr("app.services.prediction.predict_image", _raise_invalid)
+    db_repositories["create_prediction_task"].return_value = 42
+
+    resp = client.post(
+        "/predictions",
+        files={"file": ("broken.png", b"not a png", "image/png")},
+    )
+
+    _assert_error_response(resp, 400, "INVALID_IMAGE", "图片无法解码")
+    db_repositories["update_prediction_task_status"].assert_called_once_with(
+        task_id=42,
+        status="failed",
+        error_message="图片无法解码",
+    )
+    db_repositories["save_image"].assert_not_called()
+    db_repositories["save_detections"].assert_not_called()

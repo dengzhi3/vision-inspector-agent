@@ -18,31 +18,29 @@ v0.1.0 - YOLOv8 Inference Core
 vision-inspector-agent/
 │
 ├── app/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── schemas.py
-│   ├── model_loader.py
-│   └── predictor.py
-│
-├── models/
-│   └── best.pt
-│
-├── sample_data/
-│   ├── test.jpg
-│   └── test2.jpg
-│
-├── outputs/
-│   └── .gitkeep
+│   ├── main.py                 # FastAPI 入口
+│   ├── api/                    # 接口层（路由 / 依赖）
+│   ├── core/                   # 核心配置与日志
+│   ├── database/               # 数据库基础设施（连接 / 会话 / 表结构）
+│   ├── repositories/           # 数据访问层
+│   ├── services/               # 业务层（流程编排与事务边界）
+│   ├── schemas/                # Pydantic 模型
+│   ├── vision/                 # AI 视觉能力（模型加载 / 预测）
+│   └── utils/                  # 通用工具
 │
 ├── tests/
-│   └── test_predictor.py
+│   ├── unit/                   # 单元测试
+│   ├── integration/            # 集成测试（真实 SQLite）
+│   └── api/                    # 接口测试（TestClient）
 │
-├── notes/
-│   └── week-02.md
+├── scripts/                    # 运维 / 命令行脚本
+├── data/                       # SQLite 数据库文件
+├── models/                     # 模型权重
+├── outputs/                    # 批量预测输出
+├── sample_data/                # 示例图片
+├── notes/                      # 每周学习记录
+├── ultralytics/                # 定制 fork（勿删）
 │
-├── ultralytics/
-│
-├── main.py
 ├── pyproject.toml
 ├── uv.lock
 ├── .python-version
@@ -52,14 +50,17 @@ vision-inspector-agent/
 
 其中：
 
-* `app/config.py`：项目配置，包括模型路径、置信度阈值、设备和输出目录；
-* `app/schemas.py`：定义统一检测结果结构 `Detection` 和 `DetectionResult`；
-* `app/model_loader.py`：负责 YOLO 模型加载，并通过缓存避免重复加载模型；
-* `app/predictor.py`：负责单张图片和目录批量预测；
-* `tests/`：pytest 自动化测试；
+* `app/main.py`：FastAPI 应用入口（启动命令 `uvicorn app.main:app`）；
+* `app/api/`：路由层，只负责请求/响应与参数校验；
+* `app/services/`：业务层，负责流程编排与事务边界；
+* `app/repositories/`：数据访问层，只执行 SQL；
+* `app/vision/`：模型加载与推理，不依赖数据库；
+* `app/core/config.py`：项目配置（环境变量覆盖）；
+* `app/schemas/`：统一 Pydantic 结构；
+* `tests/`：pytest 自动化测试（unit / integration / api 分层）；
 * `notes/`：每周学习和项目开发记录；
 * `outputs/`：保存批量预测生成的 JSON 结果；
-* `main.py`：命令行程序入口，也是项目中统一输出结果的位置。
+* `scripts/predict_cli.py`：命令行预测入口（原根目录 `main.py` 迁移至此）。
 
 ---
 
@@ -253,7 +254,7 @@ uv run
 ## 单张图片预测
 
 ```bash
-uv run python main.py sample_data/test.jpg
+uv run python -m scripts.predict_cli sample_data/test.jpg
 ```
 
 结果以 JSON 形式打印到终端。
@@ -263,7 +264,7 @@ uv run python main.py sample_data/test.jpg
 ## 批量预测
 
 ```bash
-uv run python main.py sample_data
+uv run python -m scripts.predict_cli sample_data
 ```
 
 预测结果保存到：
@@ -279,37 +280,37 @@ outputs/predictions_时间戳.json
 设置置信度：
 
 ```bash
-uv run python main.py sample_data --conf 0.5
+uv run python -m scripts.predict_cli sample_data --conf 0.5
 ```
 
 指定 CPU：
 
 ```bash
-uv run python main.py sample_data --device cpu
+uv run python -m scripts.predict_cli sample_data --device cpu
 ```
 
 设置输入尺寸：
 
 ```bash
-uv run python main.py sample_data --imgsz 640
+uv run python -m scripts.predict_cli sample_data --imgsz 640
 ```
 
 指定模型：
 
 ```bash
-uv run python main.py sample_data/test.jpg --model models/best.pt
+uv run python -m scripts.predict_cli sample_data/test.jpg --model models/best.pt
 ```
 
 指定输出：
 
 ```bash
-uv run python main.py sample_data/test.jpg --output result.json
+uv run python -m scripts.predict_cli sample_data/test.jpg --output result.json
 ```
 
 完整参数可以查看：
 
 ```bash
-uv run python main.py -h
+uv run python -m scripts.predict_cli -h
 ```
 
 ---
@@ -319,7 +320,7 @@ uv run python main.py -h
 配置集中在：
 
 ```text
-app/config.py
+app/core/config.py
 ```
 
 代码中不直接写死模型路径、阈值和设备等参数，可以通过环境变量覆盖。
@@ -340,7 +341,7 @@ app/config.py
 核心推理接口：
 
 ```python
-app.predictor.predict_image(image_path) -> DetectionResult
+app.vision.predictor.predict_image(image_path) -> DetectionResult
 ```
 
 返回统一结构：
@@ -660,7 +661,7 @@ VisionInspector Agent
 启动开发服务器：
 
 ```bash
-uv run uvicorn app.api:app --reload
+uv run uvicorn app.main:app --reload
 
 
 ## API Schema Validation
@@ -678,3 +679,29 @@ Current schemas include:
 
 Detection confidence and bounding box values are validated
 before being exposed through the API.
+
+## Architecture
+
+
+API Layer
+
+↓
+
+Service Layer
+
+↓
+
+Repository Layer
+
+↓
+
+SQLite Database
+
+
+## Features
+
+- YOLO inference
+- Prediction persistence
+- Prediction history
+- Transaction management
+- Automated testing

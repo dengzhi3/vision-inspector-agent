@@ -1,4 +1,4 @@
-from app.database.init_db import init_database
+from app.database.models import init_database
 
 
 if __name__ == "__main__":

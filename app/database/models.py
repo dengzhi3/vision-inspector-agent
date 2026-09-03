@@ -1,11 +1,15 @@
+"""数据库表结构定义与初始化。"""
+
+from __future__ import annotations
+
 from app.database.connection import get_connection
 
+
 def init_database() -> None:
-    """初始化数据库，创建所需的表。"""
+    """初始化数据库，创建所需的表（幂等）。"""
     connection = get_connection()
     cursor = connection.cursor()
 
-    # 创建 classes 表
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS model_versions (

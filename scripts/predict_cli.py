@@ -1,9 +1,9 @@
 """命令行入口：单张图片或目录批量预测。
 
 用法示例:
-    python main.py sample_data/test.jpg     # 单图，JSON 打印到终端
-    python main.py sample_data              # 目录批量，结果保存到 outputs/
-    python main.py sample_data --conf 0.5 --device cpu
+    python -m scripts.predict_cli sample_data/test.jpg     # 单图，JSON 打印到终端
+    python -m scripts.predict_cli sample_data              # 目录批量，结果保存到 outputs/
+    python -m scripts.predict_cli sample_data --conf 0.5 --device cpu
 """
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from app.config import Settings
-from app.model_loader import ModelNotFoundError
-from app.predictor import InvalidImageError, predict_directory, predict_image
+from app.core.config import Settings
+from app.vision.model_loader import ModelNotFoundError
+from app.vision.predictor import InvalidImageError, predict_directory, predict_image
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
